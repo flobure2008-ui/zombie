@@ -1,0 +1,51 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Select Xcode
+      run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+
+    - name: Build and Archive
+      run: |
+        xcodebuild -project ZombieSurvival.xcodeproj \
+          -scheme ZombieSurvival \
+          -configuration Release \
+          -sdk iphoneos \
+          -archivePath build/ZombieSurvival.xcarchive \
+          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGN_IDENTITY="" \
+          archive
+
+    - name: Package IPA
+      run: |
+        mkdir -p build/Payload
+        cp -r build/ZombieSurvival.xcarchive/Products/Applications/ZombieSurvival.app build/Payload/
+        cd build
+        zip -r ZombieSurvival.ipa Payload
+        echo "IPA generated successfully!"
+
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ZombieSurvival-IPA
+        path: build/ZombieSurvival.ipa
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: build/ZombieSurvival.ipa
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
