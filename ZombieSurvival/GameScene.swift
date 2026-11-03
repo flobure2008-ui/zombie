@@ -1,4 +1,5 @@
 import SpriteKit
+import UIKit
 
 struct PhysicsCategory {
     static let none: UInt32     = 0
@@ -6,7 +7,6 @@ struct PhysicsCategory {
     static let zombie: UInt32   = 0b10
     static let bullet: UInt32   = 0b100
     static let wall: UInt32     = 0b1000
-    static let barrel: UInt32   = 0b10000
 }
 
 class GameScene: SKScene, SKPhysicsContactDelegate {
@@ -14,26 +14,49 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     weak var viewController: GameViewController?
     private var levelData: LevelData
     
+    // Conteneur de jeu avec Caméra fluide
+    private let worldNode = SKNode()
+    private let hudNode = SKNode()
+    private let gameCamera = SKCameraNode()
+    
+    // Joueur & Équipement
     private var player: SKNode!
+    private var playerBodyShape: SKShapeNode!
     private var flashlight: SKShapeNode!
-    private var killCount = 0
     private var playerHealth: CGFloat = 100
     private var maxPlayerHealth: CGFloat = 100
+    private var killCount = 0
     
-    private var healthBarFill: SKSpriteNode!
-    private var killLabel: SKLabelNode!
-    private var levelLabel: SKLabelNode!
+    // Armes & Munitions
+    private var ammo: Int = 30
+    private var maxAmmo: Int = 30
+    private var isReloading = false
+    private var lastShotTime: TimeInterval = 0
     
-    private var joystickBase: SKShapeNode?
-    private var joystickThumb: SKShapeNode?
-    private var joystickActive = false
+    // Double Joysticks Virtuels Flottants (True Twin-Stick Shooter)
+    private var moveTouch: UITouch?
+    private var aimTouch: UITouch?
+    
+    private var moveBaseNode: SKShapeNode!
+    private var moveThumbNode: SKShapeNode!
     private var moveVector = CGPoint.zero
     
-    private var fireButton: SKShapeNode!
-    private var isFiring = false
-    private var lastShotTime: TimeInterval = 0
-    private var currentWeapon = "Rifle" // Pistol, Shotgun, Rifle
+    private var aimBaseNode: SKShapeNode!
+    private var aimThumbNode: SKShapeNode!
+    private var aimVector = CGPoint.zero
+    private var isAimingAndShooting = false
     
+    // HUD & iPhone 13 Pro Max Safe Area
+    private var safeMarginLeft: CGFloat = 54
+    private var safeMarginRight: CGFloat = 54
+    private var safeMarginBottom: CGFloat = 25
+    private var healthBarFill: SKSpriteNode!
+    private var ammoLabel: SKLabelNode!
+    private var killLabel: SKLabelNode!
+    private var levelLabel: SKLabelNode!
+    private var reloadBtn: SKShapeNode!
+    
+    // Liste des zombies vivants
     private var zombies: [SKNode] = []
     
     init(size: CGSize, levelData: LevelData) {
@@ -48,87 +71,129 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     override func didMove(to view: SKView) {
         physicsWorld.gravity = .zero
         physicsWorld.contactDelegate = self
-        backgroundColor = SKColor(red: 0.08, green: 0.09, blue: 0.11, alpha: 1.0)
+        backgroundColor = SKColor(red: 0.05, green: 0.06, blue: 0.08, alpha: 1.0)
         
-        setupAtmosphere()
-        setupLevelMap()
+        // Organisation en couches
+        addChild(worldNode)
+        addChild(hudNode)
+        
+        // Caméra
+        addChild(gameCamera)
+        self.camera = gameCamera
+        
+        setupMapEnvironment()
         setupPlayer()
         setupHUD()
-        setupControls()
-        startSpawners()
+        setupTouchControls()
+        startZombieSpawners()
     }
     
-    private func setupAtmosphere() {
-        let gridCols = 28
-        let gridRows = 16
-        let tileW = size.width / CGFloat(gridCols)
-        let tileH = size.height / CGFloat(gridRows)
+    func updateSafeArea(insets: UIEdgeInsets, screenSize: CGSize) {
+        // Adaptation dynamique pour Notch iPhone 13 Pro Max & barre d'accueil
+        safeMarginLeft = max(50, insets.left * 1.5)
+        safeMarginRight = max(50, insets.right * 1.5)
+        safeMarginBottom = max(30, insets.bottom * 1.5)
+        refreshHUDLayout()
+    }
+    
+    // MARK: - Environnement & Graphismes
+    private func setupMapEnvironment() {
+        // Sol texturé style béton industriel / apocalypse
+        let cols = 36
+        let rows = 24
+        let tileW: CGFloat = 80
+        let tileH: CGFloat = 80
         
-        for r in 0..<gridRows {
-            for c in 0..<gridCols {
-                let tile = SKSpriteNode(color: ((r + c) % 2 == 0) ? SKColor(white: 0.11, alpha: 1.0) : SKColor(white: 0.13, alpha: 1.0), size: CGSize(width: tileW - 1, height: tileH - 1))
-                tile.position = CGPoint(x: CGFloat(c) * tileW + tileW/2, y: CGFloat(r) * tileH + tileH/2)
+        for r in 0..<rows {
+            for c in 0..<cols {
+                let x = CGFloat(c) * tileW - (CGFloat(cols) * tileW) / 2
+                let y = CGFloat(r) * tileH - (CGFloat(rows) * tileH) / 2
+                
+                let tile = SKSpriteNode(color: ((r + c) % 2 == 0) ? SKColor(red: 0.12, green: 0.13, blue: 0.16, alpha: 1.0) : SKColor(red: 0.10, green: 0.11, blue: 0.14, alpha: 1.0), size: CGSize(width: tileW - 2, height: tileH - 2))
+                tile.position = CGPoint(x: x, y: y)
                 tile.zPosition = 1
-                addChild(tile)
+                worldNode.addChild(tile)
             }
         }
-    }
-    
-    private func setupLevelMap() {
-        // Murs périmétriques
-        let boundary = SKPhysicsBody(edgeLoopFrom: frame)
-        boundary.categoryBitMask = PhysicsCategory.wall
-        self.physicsBody = boundary
         
-        // Murs du niveau
+        // Limites de la zone
+        let mapRect = CGRect(x: -1400, y: -900, width: 2800, height: 1800)
+        let border = SKPhysicsBody(edgeLoopFrom: mapRect)
+        border.categoryBitMask = PhysicsCategory.wall
+        let borderNode = SKNode()
+        borderNode.physicsBody = border
+        worldNode.addChild(borderNode)
+        
+        // Murs tactiques avec bordures néon
         for wall in levelData.walls {
-            let wallNode = SKShapeNode(rectOf: CGSize(width: wall.width, height: wall.height), cornerRadius: 4)
-            wallNode.position = CGPoint(x: wall.x, y: wall.y)
-            wallNode.fillColor = SKColor(red: 0.22, green: 0.25, blue: 0.32, alpha: 1.0)
-            wallNode.strokeColor = SKColor(red: 0.35, green: 0.40, blue: 0.50, alpha: 1.0)
-            wallNode.lineWidth = 2
+            let wx = wall.x - size.width/2
+            let wy = wall.y - size.height/2
+            
+            let wallNode = SKShapeNode(rectOf: CGSize(width: wall.width, height: wall.height), cornerRadius: 6)
+            wallNode.position = CGPoint(x: wx, y: wy)
+            wallNode.fillColor = SKColor(red: 0.18, green: 0.22, blue: 0.28, alpha: 1.0)
+            wallNode.strokeColor = SKColor(red: 0.35, green: 0.65, blue: 0.95, alpha: 0.8)
+            wallNode.glowWidth = 2
+            wallNode.lineWidth = 2.5
             wallNode.zPosition = 10
             
             wallNode.physicsBody = SKPhysicsBody(rectangleOf: CGSize(width: wall.width, height: wall.height))
             wallNode.physicsBody?.isDynamic = false
             wallNode.physicsBody?.categoryBitMask = PhysicsCategory.wall
             wallNode.physicsBody?.collisionBitMask = PhysicsCategory.player | PhysicsCategory.zombie | PhysicsCategory.bullet
-            addChild(wallNode)
+            worldNode.addChild(wallNode)
         }
     }
     
+    // MARK: - Personnage Joueur
     private func setupPlayer() {
         player = SKNode()
-        player.position = CGPoint(x: size.width / 2, y: size.height / 2)
-        player.zPosition = 20
+        player.position = .zero
+        player.zPosition = 25
         
-        // Corps joueur
-        let body = SKShapeNode(circleOfRadius: 20)
-        body.fillColor = SKColor(red: 0.2, green: 0.6, blue: 0.95, alpha: 1.0)
-        body.strokeColor = SKColor.white
-        body.lineWidth = 2
-        player.addChild(body)
+        // Ombre portée au sol
+        let shadow = SKShapeNode(circleOfRadius: 24)
+        shadow.fillColor = SKColor(white: 0, alpha: 0.45)
+        shadow.strokeColor = .clear
+        shadow.position = CGPoint(x: 0, y: -4)
+        shadow.zPosition = -2
+        player.addChild(shadow)
         
-        // Arme / Canon
-        let gun = SKShapeNode(rectOf: CGSize(width: 24, height: 7))
-        gun.position = CGPoint(x: 18, y: 0)
-        gun.fillColor = SKColor(white: 0.2, alpha: 1.0)
-        gun.strokeColor = .clear
+        // Corps commando tactique
+        playerBodyShape = SKShapeNode(circleOfRadius: 22)
+        playerBodyShape.fillColor = SKColor(red: 0.15, green: 0.45, blue: 0.85, alpha: 1.0)
+        playerBodyShape.strokeColor = SKColor(red: 0.5, green: 0.8, blue: 1.0, alpha: 1.0)
+        playerBodyShape.glowWidth = 3
+        playerBodyShape.lineWidth = 2
+        player.addChild(playerBodyShape)
+        
+        // Casque / Tête
+        let helmet = SKShapeNode(circleOfRadius: 11)
+        helmet.fillColor = SKColor(red: 0.08, green: 0.12, blue: 0.18, alpha: 1.0)
+        helmet.strokeColor = .clear
+        player.addChild(helmet)
+        
+        // Fusil d'assaut tactique double canon
+        let gun = SKShapeNode(rectOf: CGSize(width: 28, height: 9), cornerRadius: 2)
+        gun.position = CGPoint(x: 20, y: 7)
+        gun.fillColor = SKColor(white: 0.15, alpha: 1.0)
+        gun.strokeColor = SKColor.darkGray
         player.addChild(gun)
         
-        // Lampe torche / Cône lumineux
+        // Lampe torche réaliste avec cône volumétrique
         let lightPath = CGMutablePath()
-        lightPath.move(to: .zero)
-        lightPath.addLine(to: CGPoint(x: 260, y: 90))
-        lightPath.addLine(to: CGPoint(x: 260, y: -90))
+        lightPath.move(to: CGPoint(x: 10, y: 0))
+        lightPath.addLine(to: CGPoint(x: 380, y: 130))
+        lightPath.addLine(to: CGPoint(x: 380, y: -130))
         lightPath.closeSubpath()
         
         flashlight = SKShapeNode(path: lightPath)
-        flashlight.fillColor = SKColor(red: 1.0, green: 0.95, blue: 0.7, alpha: 0.16)
+        flashlight.fillColor = SKColor(red: 1.0, green: 0.95, blue: 0.75, alpha: 0.18)
         flashlight.strokeColor = .clear
         flashlight.zPosition = -1
         player.addChild(flashlight)
         
+        // Physique
         player.physicsBody = SKPhysicsBody(circleOfRadius: 20)
         player.physicsBody?.isDynamic = true
         player.physicsBody?.allowsRotation = false
@@ -136,102 +201,303 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         player.physicsBody?.collisionBitMask = PhysicsCategory.wall
         player.physicsBody?.contactTestBitMask = PhysicsCategory.zombie
         
-        addChild(player)
+        worldNode.addChild(player)
     }
     
+    // MARK: - Interface HUD Tactique
     private func setupHUD() {
-        // Barre de vie
-        let barBg = SKShapeNode(rectOf: CGSize(width: 200, height: 18), cornerRadius: 4)
-        barBg.position = CGPoint(x: 140, y: size.height - 40)
-        barBg.fillColor = SKColor(white: 0.15, alpha: 0.8)
-        barBg.strokeColor = SKColor.white.withAlphaComponent(0.4)
-        barBg.zPosition = 100
-        addChild(barBg)
+        hudNode.zPosition = 100
         
-        healthBarFill = SKSpriteNode(color: SKColor(red: 0.15, green: 0.85, blue: 0.35, alpha: 1.0), size: CGSize(width: 196, height: 14))
+        // 1. Barre de vie (Haut Gauche)
+        let hpBg = SKShapeNode(rectOf: CGSize(width: 220, height: 22), cornerRadius: 6)
+        hpBg.name = "hp_bg"
+        hpBg.fillColor = SKColor(white: 0.12, alpha: 0.85)
+        hpBg.strokeColor = SKColor(white: 0.4, alpha: 0.5)
+        hudNode.addChild(hpBg)
+        
+        healthBarFill = SKSpriteNode(color: SKColor(red: 0.1, green: 0.85, blue: 0.35, alpha: 1.0), size: CGSize(width: 214, height: 16))
         healthBarFill.anchorPoint = CGPoint(x: 0, y: 0.5)
-        healthBarFill.position = CGPoint(x: 42, y: size.height - 40)
-        healthBarFill.zPosition = 101
-        addChild(healthBarFill)
+        healthBarFill.name = "hp_fill"
+        hudNode.addChild(healthBarFill)
         
-        // Titre niveau
-        levelLabel = SKLabelNode(fontNamed: "HelveticaNeue-Bold")
-        levelLabel.text = "\(levelData.title) (\(levelData.id)/100)"
-        levelLabel.fontSize = 20
+        // 2. Compteur Munitions & Bouton Recharge
+        ammoLabel = SKLabelNode(fontNamed: "TrebuchetMS-Bold")
+        ammoLabel.text = "AMMO: 30 / 30"
+        ammoLabel.fontSize = 20
+        ammoLabel.fontColor = SKColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1.0)
+        hudNode.addChild(ammoLabel)
+        
+        reloadBtn = SKShapeNode(rectOf: CGSize(width: 95, height: 32), cornerRadius: 6)
+        reloadBtn.name = "btn_reload"
+        reloadBtn.fillColor = SKColor(red: 0.8, green: 0.4, blue: 0.1, alpha: 0.85)
+        reloadBtn.strokeColor = .white
+        hudNode.addChild(reloadBtn)
+        
+        let relLbl = SKLabelNode(text: "RELOAD")
+        relLbl.name = "btn_reload"
+        relLbl.fontSize = 13
+        relLbl.fontName = "HelveticaNeue-BlackCondensed"
+        relLbl.verticalAlignmentMode = .center
+        reloadBtn.addChild(relLbl)
+        
+        // 3. Titre Niveau & Objectif (Haut Centre / Droit)
+        levelLabel = SKLabelNode(fontNamed: "HelveticaNeue-BlackCondensed")
+        levelLabel.text = "\(levelData.title.uppercased()) [NIVEAU \(levelData.id)/100]"
+        levelLabel.fontSize = 22
         levelLabel.fontColor = .white
-        levelLabel.position = CGPoint(x: size.width / 2, y: size.height - 45)
-        levelLabel.zPosition = 100
-        addChild(levelLabel)
+        hudNode.addChild(levelLabel)
         
-        // Score / Éliminations
-        killLabel = SKLabelNode(fontNamed: "HelveticaNeue-Bold")
-        killLabel.text = "ZOMBIES: 0 / \(levelData.targetKills)"
-        killLabel.fontSize = 18
+        killLabel = SKLabelNode(fontNamed: "TrebuchetMS-Bold")
+        killLabel.text = "KILLS: 0 / \(levelData.targetKills)"
+        killLabel.fontSize = 19
         killLabel.fontColor = SKColor(red: 1.0, green: 0.3, blue: 0.3, alpha: 1.0)
-        killLabel.horizontalAlignmentMode = .right
-        killLabel.position = CGPoint(x: size.width - 50, y: size.height - 45)
-        killLabel.zPosition = 100
-        addChild(killLabel)
+        hudNode.addChild(killLabel)
         
-        // Bouton Éditeur
-        let editorBtn = SKShapeNode(rectOf: CGSize(width: 110, height: 35), cornerRadius: 6)
-        editorBtn.name = "editor_button"
-        editorBtn.position = CGPoint(x: size.width - 90, y: 50)
-        editorBtn.fillColor = SKColor(red: 0.2, green: 0.25, blue: 0.45, alpha: 0.85)
-        editorBtn.strokeColor = .white
-        editorBtn.zPosition = 100
-        addChild(editorBtn)
+        // 4. Bouton Éditeur
+        let editBtn = SKShapeNode(rectOf: CGSize(width: 110, height: 34), cornerRadius: 8)
+        editBtn.name = "btn_editor"
+        editBtn.fillColor = SKColor(red: 0.2, green: 0.25, blue: 0.45, alpha: 0.8)
+        editBtn.strokeColor = .white
+        hudNode.addChild(editBtn)
         
-        let editorLbl = SKLabelNode(text: "Éditeur")
-        editorLbl.name = "editor_button"
-        editorLbl.fontSize = 15
-        editorLbl.fontName = "HelveticaNeue-Bold"
-        editorLbl.verticalAlignmentMode = .center
-        editorBtn.addChild(editorLbl)
+        let editLbl = SKLabelNode(text: "⚙ ÉDITEUR")
+        editLbl.name = "btn_editor"
+        editLbl.fontName = "HelveticaNeue-Bold"
+        editLbl.fontSize = 14
+        editLbl.verticalAlignmentMode = .center
+        editBtn.addChild(editLbl)
+        
+        refreshHUDLayout()
     }
     
-    private func setupControls() {
-        // Joystick Virtuel gauche
-        let base = SKShapeNode(circleOfRadius: 60)
-        base.position = CGPoint(x: 130, y: 130)
-        base.fillColor = SKColor(white: 0.3, alpha: 0.35)
-        base.strokeColor = SKColor(white: 0.7, alpha: 0.5)
-        base.lineWidth = 2
-        base.zPosition = 150
-        addChild(base)
-        self.joystickBase = base
+    private func refreshHUDLayout() {
+        let halfW = size.width / 2
+        let halfH = size.height / 2
         
-        let thumb = SKShapeNode(circleOfRadius: 28)
-        thumb.position = CGPoint(x: 130, y: 130)
-        thumb.fillColor = SKColor(white: 0.9, alpha: 0.75)
-        thumb.strokeColor = .clear
-        thumb.zPosition = 151
-        addChild(thumb)
-        self.joystickThumb = thumb
+        // Aligner en tenant compte de la Dynamic Island / Notch
+        let leftX = -halfW + safeMarginLeft
+        let rightX = halfW - safeMarginRight
+        let topY = halfH - 45
         
-        // Bouton Tir droit
-        fireButton = SKShapeNode(circleOfRadius: 50)
-        fireButton.name = "fire_button"
-        fireButton.position = CGPoint(x: size.width - 130, y: 130)
-        fireButton.fillColor = SKColor(red: 0.9, green: 0.2, blue: 0.2, alpha: 0.5)
-        fireButton.strokeColor = SKColor(red: 1.0, green: 0.4, blue: 0.4, alpha: 0.8)
-        fireButton.lineWidth = 3
-        fireButton.zPosition = 150
-        addChild(fireButton)
+        if let hpBg = hudNode.childNode(withName: "hp_bg") {
+            hpBg.position = CGPoint(x: leftX + 110, y: topY)
+        }
+        healthBarFill.position = CGPoint(x: leftX + 3, y: topY)
         
-        let fireLbl = SKLabelNode(text: "FIRE")
-        fireLbl.name = "fire_button"
-        fireLbl.fontName = "HelveticaNeue-BlackCondensed"
-        fireLbl.fontSize = 20
-        fireLbl.verticalAlignmentMode = .center
-        fireButton.addChild(fireLbl)
+        ammoLabel.position = CGPoint(x: leftX + 80, y: topY - 32)
+        reloadBtn.position = CGPoint(x: leftX + 205, y: topY - 30)
+        
+        levelLabel.position = CGPoint(x: 0, y: topY)
+        killLabel.position = CGPoint(x: rightX - 60, y: topY)
+        
+        if let editBtn = hudNode.childNode(withName: "btn_editor") {
+            editBtn.position = CGPoint(x: rightX - 55, y: topY - 45)
+        }
     }
     
-    private func startSpawners() {
+    // MARK: - Contrôles Twin-Stick (Tactile console pro)
+    private func setupTouchControls() {
+        // Base Joystick Gauche (Déplacement)
+        moveBaseNode = SKShapeNode(circleOfRadius: 65)
+        moveBaseNode.fillColor = SKColor(white: 0.15, alpha: 0.45)
+        moveBaseNode.strokeColor = SKColor(white: 0.8, alpha: 0.6)
+        moveBaseNode.lineWidth = 2.5
+        moveBaseNode.isHidden = true
+        hudNode.addChild(moveBaseNode)
+        
+        moveThumbNode = SKShapeNode(circleOfRadius: 30)
+        moveThumbNode.fillColor = SKColor(red: 0.3, green: 0.7, blue: 1.0, alpha: 0.85)
+        moveThumbNode.strokeColor = .white
+        moveThumbNode.lineWidth = 2
+        moveThumbNode.isHidden = true
+        hudNode.addChild(moveThumbNode)
+        
+        // Base Joystick Droit (Visée & Tir 360°)
+        aimBaseNode = SKShapeNode(circleOfRadius: 65)
+        aimBaseNode.fillColor = SKColor(red: 0.7, green: 0.15, blue: 0.15, alpha: 0.45)
+        aimBaseNode.strokeColor = SKColor(red: 1.0, green: 0.4, blue: 0.4, alpha: 0.7)
+        aimBaseNode.lineWidth = 2.5
+        aimBaseNode.isHidden = true
+        hudNode.addChild(aimBaseNode)
+        
+        aimThumbNode = SKShapeNode(circleOfRadius: 30)
+        aimThumbNode.fillColor = SKColor(red: 1.0, green: 0.25, blue: 0.25, alpha: 0.9)
+        aimThumbNode.strokeColor = .white
+        aimThumbNode.lineWidth = 2
+        aimThumbNode.isHidden = true
+        hudNode.addChild(aimThumbNode)
+    }
+    
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            let hudLoc = touch.location(in: hudNode)
+            let touchedHud = hudNode.nodes(at: hudLoc)
+            
+            if touchedHud.contains(where: { $0.name == "btn_editor" }) {
+                viewController?.openLevelEditor()
+                return
+            }
+            if touchedHud.contains(where: { $0.name == "btn_reload" }) {
+                reloadWeapon()
+                return
+            }
+            
+            // Côté Gauche -> Joystick Mouvement Flottant
+            if hudLoc.x < 0 && moveTouch == nil {
+                moveTouch = touch
+                moveBaseNode.position = hudLoc
+                moveThumbNode.position = hudLoc
+                moveBaseNode.isHidden = false
+                moveThumbNode.isHidden = false
+            }
+            // Côté Droit -> Joystick Visée & Tir Flottant
+            else if hudLoc.x >= 0 && aimTouch == nil {
+                aimTouch = touch
+                aimBaseNode.position = hudLoc
+                aimThumbNode.position = hudLoc
+                aimBaseNode.isHidden = false
+                aimThumbNode.isHidden = false
+                isAimingAndShooting = true
+            }
+        }
+    }
+    
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            let hudLoc = touch.location(in: hudNode)
+            
+            // Mise à jour Déplacement
+            if touch == moveTouch {
+                let dx = hudLoc.x - moveBaseNode.position.x
+                let dy = hudLoc.y - moveBaseNode.position.y
+                let dist = sqrt(dx*dx + dy*dy)
+                let maxDist: CGFloat = 55
+                
+                if dist > maxDist {
+                    let angle = atan2(dy, dx)
+                    moveThumbNode.position = CGPoint(x: moveBaseNode.position.x + cos(angle) * maxDist, y: moveBaseNode.position.y + sin(angle) * maxDist)
+                    moveVector = CGPoint(x: cos(angle), y: sin(angle))
+                } else {
+                    moveThumbNode.position = hudLoc
+                    moveVector = CGPoint(x: dx / maxDist, y: dy / maxDist)
+                }
+            }
+            
+            // Mise à jour Visée / Tir
+            if touch == aimTouch {
+                let dx = hudLoc.x - aimBaseNode.position.x
+                let dy = hudLoc.y - aimBaseNode.position.y
+                let dist = sqrt(dx*dx + dy*dy)
+                let maxDist: CGFloat = 55
+                
+                if dist > 15 {
+                    let angle = atan2(dy, dx)
+                    aimVector = CGPoint(x: cos(angle), y: sin(angle))
+                    player.zRotation = angle
+                    
+                    if dist > maxDist {
+                        aimThumbNode.position = CGPoint(x: aimBaseNode.position.x + cos(angle) * maxDist, y: aimBaseNode.position.y + sin(angle) * maxDist)
+                    } else {
+                        aimThumbNode.position = hudLoc
+                    }
+                    isAimingAndShooting = true
+                }
+            }
+        }
+    }
+    
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            if touch == moveTouch {
+                moveTouch = nil
+                moveVector = .zero
+                moveBaseNode.isHidden = true
+                moveThumbNode.isHidden = true
+            }
+            if touch == aimTouch {
+                aimTouch = nil
+                aimVector = .zero
+                aimBaseNode.isHidden = true
+                aimThumbNode.isHidden = true
+                isAimingAndShooting = false
+            }
+        }
+    }
+    
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        touchesEnded(touches, with: event)
+    }
+    
+    // MARK: - Mécaniques d'Armes & Tirs
+    private func shootBullet() {
+        if isReloading { return }
+        if ammo <= 0 {
+            reloadWeapon()
+            return
+        }
+        
+        let now = CACurrentMediaTime()
+        if now - lastShotTime < 0.11 { return } // Cadence rapide de fusil d'assaut
+        lastShotTime = now
+        ammo -= 1
+        updateAmmoHUD()
+        
+        let angle = player.zRotation
+        let spawnPos = CGPoint(x: player.position.x + cos(angle) * 34, y: player.position.y + sin(angle) * 34)
+        
+        let bullet = SKShapeNode(circleOfRadius: 4.0)
+        bullet.position = spawnPos
+        bullet.fillColor = SKColor(red: 1.0, green: 0.9, blue: 0.3, alpha: 1.0)
+        bullet.strokeColor = .white
+        bullet.glowWidth = 3
+        bullet.zPosition = 28
+        
+        bullet.physicsBody = SKPhysicsBody(circleOfRadius: 4.0)
+        bullet.physicsBody?.isDynamic = true
+        bullet.physicsBody?.categoryBitMask = PhysicsCategory.bullet
+        bullet.physicsBody?.collisionBitMask = PhysicsCategory.wall
+        bullet.physicsBody?.contactTestBitMask = PhysicsCategory.zombie | PhysicsCategory.wall
+        
+        let speed: CGFloat = 1350
+        bullet.physicsBody?.velocity = CGVector(dx: cos(angle) * speed, dy: sin(angle) * speed)
+        
+        worldNode.addChild(bullet)
+        ParticleEffects.createMuzzleFlash(at: spawnPos, angle: angle, in: worldNode)
+        
+        bullet.run(SKAction.sequence([SKAction.wait(forDuration: 1.3), SKAction.removeFromParent()]))
+    }
+    
+    private func reloadWeapon() {
+        if isReloading || ammo == maxAmmo { return }
+        isReloading = true
+        ammoLabel.text = "RECHARGEMENT..."
+        ammoLabel.fontColor = .orange
+        
+        let reloadAction = SKAction.sequence([
+            SKAction.wait(forDuration: 1.2),
+            SKAction.run { [weak self] in
+                guard let self = self else { return }
+                self.ammo = self.maxAmmo
+                self.isReloading = false
+                self.updateAmmoHUD()
+            }
+        ])
+        run(reloadAction)
+    }
+    
+    private func updateAmmoHUD() {
+        ammoLabel.text = "AMMO: \(ammo) / \(maxAmmo)"
+        ammoLabel.fontColor = ammo <= 5 ? .red : SKColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1.0)
+    }
+    
+    // MARK: - Spawners & Zombies variés
+    private func startZombieSpawners() {
         for spawner in levelData.spawners {
             let wait = SKAction.wait(forDuration: spawner.interval)
             let spawn = SKAction.run { [weak self] in
-                self?.spawnZombie(at: CGPoint(x: spawner.x, y: spawner.y), type: spawner.zombieType)
+                let sx = spawner.x - (self?.size.width ?? 0)/2
+                let sy = spawner.y - (self?.size.height ?? 0)/2
+                self?.spawnZombie(at: CGPoint(x: sx, y: sy), type: spawner.zombieType)
             }
             run(SKAction.repeatForever(SKAction.sequence([wait, spawn])))
         }
@@ -241,32 +507,46 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         let zombie = SKNode()
         zombie.name = "zombie"
         zombie.position = pos
-        zombie.zPosition = 15
+        zombie.zPosition = 20
         
-        var radius: CGFloat = 18
-        var color = SKColor(red: 0.2, green: 0.7, blue: 0.3, alpha: 1.0)
-        var hp: CGFloat = 35.0 * levelData.zombieHealthMultiplier
-        var speed: CGFloat = 90.0 * levelData.zombieSpeedMultiplier
+        var radius: CGFloat = 20
+        var color = SKColor(red: 0.18, green: 0.75, blue: 0.35, alpha: 1.0)
+        var hp: CGFloat = 40.0 * levelData.zombieHealthMultiplier
+        var speed: CGFloat = 95.0 * levelData.zombieSpeedMultiplier
         
         if type == "fast" {
-            radius = 14
-            color = SKColor(red: 0.9, green: 0.7, blue: 0.1, alpha: 1.0)
-            hp = 20.0 * levelData.zombieHealthMultiplier
-            speed = 150.0 * levelData.zombieSpeedMultiplier
+            radius = 16
+            color = SKColor(red: 0.95, green: 0.75, blue: 0.1, alpha: 1.0)
+            hp = 25.0 * levelData.zombieHealthMultiplier
+            speed = 165.0 * levelData.zombieSpeedMultiplier
         } else if type == "tank" {
-            radius = 28
-            color = SKColor(red: 0.6, green: 0.1, blue: 0.1, alpha: 1.0)
-            hp = 120.0 * levelData.zombieHealthMultiplier
-            speed = 55.0 * levelData.zombieSpeedMultiplier
+            radius = 32
+            color = SKColor(red: 0.75, green: 0.12, blue: 0.12, alpha: 1.0)
+            hp = 150.0 * levelData.zombieHealthMultiplier
+            speed = 60.0 * levelData.zombieSpeedMultiplier
         }
         
         zombie.userData = NSMutableDictionary(dictionary: ["hp": hp, "speed": speed])
         
+        // Corps zombie
         let body = SKShapeNode(circleOfRadius: radius)
         body.fillColor = color
-        body.strokeColor = SKColor.black
-        body.lineWidth = 2
+        body.strokeColor = SKColor(white: 0.1, alpha: 0.9)
+        body.lineWidth = 2.5
         zombie.addChild(body)
+        
+        // Yeux menaçants lumineux
+        let eye1 = SKShapeNode(circleOfRadius: 3)
+        eye1.position = CGPoint(x: radius * 0.5, y: 5)
+        eye1.fillColor = .red
+        eye1.strokeColor = .clear
+        zombie.addChild(eye1)
+        
+        let eye2 = SKShapeNode(circleOfRadius: 3)
+        eye2.position = CGPoint(x: radius * 0.5, y: -5)
+        eye2.fillColor = .red
+        eye2.strokeColor = .clear
+        zombie.addChild(eye2)
         
         zombie.physicsBody = SKPhysicsBody(circleOfRadius: radius)
         zombie.physicsBody?.isDynamic = true
@@ -275,120 +555,34 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         zombie.physicsBody?.collisionBitMask = PhysicsCategory.wall | PhysicsCategory.zombie
         zombie.physicsBody?.contactTestBitMask = PhysicsCategory.player | PhysicsCategory.bullet
         
-        addChild(zombie)
+        worldNode.addChild(zombie)
         zombies.append(zombie)
     }
     
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches {
-            let loc = touch.location(in: self)
-            let touchedNodes = nodes(at: loc)
-            
-            if touchedNodes.contains(where: { $0.name == "editor_button" }) {
-                viewController?.openLevelEditor()
-                return
-            }
-            
-            if touchedNodes.contains(where: { $0.name == "fire_button" }) {
-                isFiring = true
-                shootBullet()
-                continue
-            }
-            
-            if loc.x < size.width / 2 {
-                joystickActive = true
-                updateJoystick(at: loc)
-            }
-        }
-    }
-    
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches {
-            let loc = touch.location(in: self)
-            if loc.x < size.width / 2 && joystickActive {
-                updateJoystick(at: loc)
-            }
-        }
-    }
-    
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches {
-            let loc = touch.location(in: self)
-            if loc.x < size.width / 2 {
-                joystickActive = false
-                moveVector = .zero
-                joystickThumb?.position = joystickBase?.position ?? CGPoint(x: 130, y: 130)
-            }
-            let touchedNodes = nodes(at: loc)
-            if touchedNodes.contains(where: { $0.name == "fire_button" }) {
-                isFiring = false
-            }
-        }
-    }
-    
-    private func updateJoystick(at loc: CGPoint) {
-        guard let base = joystickBase else { return }
-        let dx = loc.x - base.position.x
-        let dy = loc.y - base.position.y
-        let dist = sqrt(dx*dx + dy*dy)
-        let maxRadius: CGFloat = 50
-        
-        if dist > maxRadius {
-            let angle = atan2(dy, dx)
-            joystickThumb?.position = CGPoint(x: base.position.x + cos(angle) * maxRadius, y: base.position.y + sin(angle) * maxRadius)
-            moveVector = CGPoint(x: cos(angle), y: sin(angle))
-        } else {
-            joystickThumb?.position = loc
-            moveVector = CGPoint(x: dx / maxRadius, y: dy / maxRadius)
-        }
-    }
-    
-    private func shootBullet() {
-        let now = CACurrentMediaTime()
-        if now - lastShotTime < 0.14 { return }
-        lastShotTime = now
-        
-        let bullet = SKShapeNode(circleOfRadius: 4.5)
-        bullet.name = "bullet"
-        let angle = player.zRotation
-        
-        let spawnPos = CGPoint(x: player.position.x + cos(angle) * 30, y: player.position.y + sin(angle) * 30)
-        bullet.position = spawnPos
-        bullet.fillColor = SKColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1.0)
-        bullet.strokeColor = .white
-        bullet.glowWidth = 2
-        bullet.zPosition = 22
-        
-        bullet.physicsBody = SKPhysicsBody(circleOfRadius: 4.5)
-        bullet.physicsBody?.isDynamic = true
-        bullet.physicsBody?.categoryBitMask = PhysicsCategory.bullet
-        bullet.physicsBody?.collisionBitMask = PhysicsCategory.wall
-        bullet.physicsBody?.contactTestBitMask = PhysicsCategory.zombie | PhysicsCategory.wall
-        
-        let speed: CGFloat = 1100
-        bullet.physicsBody?.velocity = CGVector(dx: cos(angle) * speed, dy: sin(angle) * speed)
-        
-        addChild(bullet)
-        ParticleEffects.createMuzzleFlash(at: spawnPos, angle: angle, in: self)
-        
-        bullet.run(SKAction.sequence([SKAction.wait(forDuration: 1.6), SKAction.removeFromParent()]))
-    }
-    
+    // MARK: - Boucle Principale & Caméra
     override func update(_ currentTime: TimeInterval) {
         // Déplacement du joueur
-        if joystickActive {
-            let pSpeed: CGFloat = 220
-            player.physicsBody?.velocity = CGVector(dx: moveVector.x * pSpeed, dy: moveVector.y * pSpeed)
-            let targetAngle = atan2(moveVector.y, moveVector.x)
-            player.zRotation = targetAngle
-        } else {
-            player.physicsBody?.velocity = .zero
+        let pSpeed: CGFloat = 240
+        player.physicsBody?.velocity = CGVector(dx: moveVector.x * pSpeed, dy: moveVector.y * pSpeed)
+        
+        if moveVector != .zero && !isAimingAndShooting {
+            player.zRotation = atan2(moveVector.y, moveVector.x)
         }
         
-        // Tir continu si pressé
-        if isFiring {
+        // Tir en continu si visée active
+        if isAimingAndShooting {
             shootBullet()
         }
+        
+        // La caméra suit le joueur avec amorti fluide
+        let targetCamPos = player.position
+        gameCamera.position = CGPoint(
+            x: gameCamera.position.x + (targetCamPos.x - gameCamera.position.x) * 0.12,
+            y: gameCamera.position.y + (targetCamPos.y - gameCamera.position.y) * 0.12
+        )
+        
+        // Le HUD reste fixé à la caméra
+        hudNode.position = gameCamera.position
         
         // IA Zombies traqueurs
         for z in zombies {
@@ -400,34 +594,32 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             if dist > 0 {
                 let angle = atan2(dy, dx)
                 z.zRotation = angle
-                let speed = (z.userData?["speed"] as? CGFloat) ?? 80
+                let speed = (z.userData?["speed"] as? CGFloat) ?? 85
                 z.physicsBody?.velocity = CGVector(dx: cos(angle) * speed, dy: sin(angle) * speed)
             }
         }
     }
     
+    // MARK: - Contacts & Physique
     func didBegin(_ contact: SKPhysicsContact) {
-        var firstBody: SKPhysicsBody
-        var secondBody: SKPhysicsBody
-        if contact.bodyA.categoryBitMask < contact.bodyB.categoryBitMask {
-            firstBody = contact.bodyA
-            secondBody = contact.bodyB
-        } else {
-            firstBody = contact.bodyB
-            secondBody = contact.bodyA
+        var first = contact.bodyA
+        var second = contact.bodyB
+        if first.categoryBitMask > second.categoryBitMask {
+            first = contact.bodyB
+            second = contact.bodyA
         }
         
         // Balle vs Zombie
-        if firstBody.categoryBitMask == PhysicsCategory.zombie && secondBody.categoryBitMask == PhysicsCategory.bullet {
-            if let zombieNode = firstBody.node, let bulletNode = secondBody.node {
+        if first.categoryBitMask == PhysicsCategory.zombie && second.categoryBitMask == PhysicsCategory.bullet {
+            if let zombieNode = first.node, let bulletNode = second.node {
                 bulletNode.removeFromParent()
-                ParticleEffects.createBloodSplat(at: contact.contactPoint, in: self)
+                ParticleEffects.createBloodSplat(at: contact.contactPoint, in: worldNode)
                 
                 if let data = zombieNode.userData, var hp = data["hp"] as? CGFloat {
-                    hp -= 25.0
+                    hp -= 30.0
                     data["hp"] = hp
                     if hp <= 0 {
-                        ParticleEffects.createExplosion(at: zombieNode.position, in: self)
+                        ParticleEffects.createExplosion(at: zombieNode.position, in: worldNode)
                         zombies.removeAll(where: { $0 == zombieNode })
                         zombieNode.removeFromParent()
                         recordKill()
@@ -437,22 +629,22 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         }
         
         // Zombie vs Joueur
-        if firstBody.categoryBitMask == PhysicsCategory.player && secondBody.categoryBitMask == PhysicsCategory.zombie {
-            playerDamage(12)
+        if first.categoryBitMask == PhysicsCategory.player && second.categoryBitMask == PhysicsCategory.zombie {
+            playerDamage(10)
         }
     }
     
     private func playerDamage(_ amt: CGFloat) {
         playerHealth = max(0, playerHealth - amt)
         let percent = playerHealth / maxPlayerHealth
-        healthBarFill.size.width = 196 * percent
+        healthBarFill.size.width = 214 * percent
         
-        // Flash d'impact rouge
-        let redFlash = SKSpriteNode(color: SKColor.red.withAlphaComponent(0.3), size: size)
-        redFlash.position = CGPoint(x: size.width / 2, y: size.height / 2)
-        redFlash.zPosition = 200
-        addChild(redFlash)
-        redFlash.run(SKAction.sequence([SKAction.fadeOut(withDuration: 0.15), SKAction.removeFromParent()]))
+        // Effet de choc rouge à l'écran
+        let flash = SKSpriteNode(color: SKColor.red.withAlphaComponent(0.35), size: size)
+        flash.position = .zero
+        flash.zPosition = 200
+        hudNode.addChild(flash)
+        flash.run(SKAction.sequence([SKAction.fadeOut(withDuration: 0.15), SKAction.removeFromParent()]))
         
         if playerHealth <= 0 {
             gameOver()
@@ -461,8 +653,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     
     private func recordKill() {
         killCount += 1
-        killLabel.text = "ZOMBIES: \(killCount) / \(levelData.targetKills)"
-        
+        killLabel.text = "KILLS: \(killCount) / \(levelData.targetKills)"
         if killCount >= levelData.targetKills {
             levelComplete()
         }
@@ -470,13 +661,13 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     
     private func levelComplete() {
         isPaused = true
-        let victoryLabel = SKLabelNode(fontNamed: "HelveticaNeue-BlackCondensed")
-        victoryLabel.text = "NIVEAU TERMINÉ !"
-        victoryLabel.fontSize = 46
-        victoryLabel.fontColor = SKColor(red: 0.2, green: 0.9, blue: 0.4, alpha: 1.0)
-        victoryLabel.position = CGPoint(x: size.width / 2, y: size.height / 2)
-        victoryLabel.zPosition = 250
-        addChild(victoryLabel)
+        let victory = SKLabelNode(fontNamed: "HelveticaNeue-BlackCondensed")
+        victory.text = "ZONE PURIFIÉE ! NIVEAU TERMINÉ"
+        victory.fontSize = 42
+        victory.fontColor = SKColor(red: 0.2, green: 0.95, blue: 0.4, alpha: 1.0)
+        victory.position = CGPoint(x: 0, y: 0)
+        victory.zPosition = 300
+        hudNode.addChild(victory)
         
         run(SKAction.sequence([
             SKAction.wait(forDuration: 1.8),
@@ -491,12 +682,12 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private func gameOver() {
         isPaused = true
         let lost = SKLabelNode(fontNamed: "HelveticaNeue-BlackCondensed")
-        lost.text = "VOUS ÊTES MORT !"
-        lost.fontSize = 50
+        lost.text = "VOUS AVEZ ÉTÉ DÉVORÉ !"
+        lost.fontSize = 48
         lost.fontColor = SKColor.red
-        lost.position = CGPoint(x: size.width / 2, y: size.height / 2)
-        lost.zPosition = 250
-        addChild(lost)
+        lost.position = CGPoint(x: 0, y: 0)
+        lost.zPosition = 300
+        hudNode.addChild(lost)
         
         run(SKAction.sequence([
             SKAction.wait(forDuration: 2.0),
